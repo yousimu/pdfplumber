@@ -1,12 +1,13 @@
 # pdfplumber PDF处理工具
 
-日常使用的Python脚本集合，专注于PDF文档处理。
+处理PDF书籍文档，规范重命名、翻译目录并生成 Markdown 文件（可用于个人和AI解读书籍的信息的添加及展示）
+
 
 ## 功能特点
 
 - **PDF元数据提取**：自动从PDF文件的版权页提取书籍元数据（标题、作者、ISBN等）
 - **智能文件重命名**：根据提取的元数据自动重命名PDF文件
-- **目录翻译**：支持中英文目录翻译，可使用本地大模型或在线API
+- **目录翻译**：支持中英文目录翻译，可使用本地大模型或在线API，将翻译目录写入沉浸式翻译 [PDFMathTranslate-next](https://github.com/awwaawwa/PDFMathTranslate) 制作成的pdf文件中
 - **Markdown生成**：自动生成书籍信息的Markdown文档
 - **批量处理**：支持批量处理大量PDF文件
 - **状态跟踪**：使用processing.json文件跟踪每个文件的处理状态，避免重复处理
@@ -29,9 +30,9 @@ pdfplumber/
 
 ## 项目截图
 
-![处理过程](pdfplumber/resource/01-processing-procedure.png)
+![处理过程](resource/01-processing-procedure.png)
 
-![网页展示](pdfplumber/resource/02-md-web-display.png)
+![网页展示](resource/02-md-web-display.png)
 
 ## 核心处理流程
 
@@ -145,13 +146,13 @@ graph TD
 3. default配置
 
 主要配置项包括：
-- \`WIKI_BASE_PATH\`: wiki基础路径，用于存放处理后的文件
-- \`EOOKS_PATH\`: 电子书原始文件路径
-- \`LOG_LEVEL\`: 日志级别
-- \`OLLAMA_BASE_URL\`: Ollama服务地址
-- \`OLLAMA_MODEL\`: 使用的Ollama模型
-- \`DEEPSEEK_API_KEY\`: DeepSeek API密钥（如果使用DeepSeek）
-- \`PROXIES\`: 代理设置
+- **WIKI_BASE_PATH**: wiki基础路径，用于存放处理后的文件
+- **EOOKS_PATH**: 电子书原始文件路径
+- **LOG_LEVEL**: 日志级别
+- **OLLAMA_BASE_URL**: Ollama服务地址
+- **OLLAMA_MODEL**: 使用的Ollama模型
+- **DEEPSEEK_API_KEY**: DeepSeek API密钥（如果使用DeepSeek）
+- **PROXIES**: 代理设置
 
 
 ### config.json
@@ -160,14 +161,31 @@ graph TD
 
 ```json
 {
-  "default": {
-    "EOOKS_PATH": "/path/to/ebooks",
-    "WIKI_BASE_PATH": "/path/to/wiki"
-  },
-  "your-hostname": {
-    "EOOKS_PATH": "/custom/path/to/ebooks",
-    "WIKI_BASE_PATH": "/custom/path/to/wiki"
-  }
+    "default": {
+        "WIKI_BASE_PATH": "/path/to/your/wiki/base/path",
+        "EOOKS_PATH": "/path/to/your/ebooks/path",
+        "LOG_LEVEL": "INFO",
+        "OLLAMA_BASE_URL": "http://localhost:11434",
+        "OLLAMA_MODEL": "qwen2.5:14b-instruct-q4_K_M",
+        "DEEPSEEK_API_KEY": "your_deepseek_api_key_here",
+        "PROXIES": {
+            "http": "",
+            "https": ""
+        }
+    },
+    "$HOSTNAME": {
+        "hostname": "$HOSTNAME",
+        "WIKI_BASE_PATH": "/path/to/your/wiki/base/path",
+        "EOOKS_PATH": "/path/to/your/ebooks/path",
+        "LOG_LEVEL": "INFO",
+        "OLLAMA_BASE_URL": "http://localhost:11434",
+        "OLLAMA_MODEL": "qwen2.5:14b-instruct-q4_K_M",
+        "DEEPSEEK_API_KEY": "your_deepseek_api_key_here",
+        "PROXIES": {
+            "http": "",
+            "https": ""
+        }
+    }
 }
 ```
 
