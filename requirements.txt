@@ -1,0 +1,10 @@
+PyMuPDF
+rapidocr-onnxruntime   # 纯 CPU，跨平台，M1/M2/M3/M4 通吃
+requests
+beautifulsoup4
+opencc-python-reimplemented
+python-slugify
+langdetect
+slugify
+frontend
+rapidocr_onnxruntime
