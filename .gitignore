@@ -1,10 +1,11 @@
-pdfplumber/data/processing/
+data/processing/
 .vscode/settings.json
 processing.json
 processing.json.backup
 test.py
-no_title_files.txt
+temporarily_files.txt
 config.json
+*.log.*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

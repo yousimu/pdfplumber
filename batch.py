@@ -1,17 +1,15 @@
 
-import os
 import json
 import secrets
 import string
-import platform
 from pathlib import Path
 from _utils import logger, check_model_exists,is_target_file, load_json_file, get_safe_title, has_bookmarks
-from _utils import  OLLAMA_BASE_URL, OLLAMA_MODEL,WIKI_BASE_PATH,CONFIG_FILE, LOG_DIR, DATA_DIR
+from _utils import OLLAMA_BASE_URL, OLLAMA_MODEL, WIKI_BASE_PATH, LOG_DIR, DATA_DIR, EOOKS_PATH, RENAME_PDF_FILES
 import time  # 添加时间模块用于统计
 from batch_01_cip_parser import cip_parser
 from batch_02_rename import rename_related_pdfs, find_related_files
-from batch_03_toc import translate_toc, pdf_import_toc_xml
-from batch_04_md import build_md
+from batch_03_toc import translate_toc, pdf_import_toc_xml, TOC_DIR
+from batch_04_md import build_markdown
 
 """
 将处理的数据存在下面的 processing.json 文件中，避免重复做：
@@ -27,6 +25,7 @@ from batch_04_md import build_md
     },
   	"books_id": "NLJR-erIu7vr0lFB2",    # 谷歌的id，或者自定义的随机 id（以 NLJR-xxxxx 前缀），同时也是封面图片名
     "norm_isbn": "9789351342939",       # 有 ISBN 则为书本，具有唯一性
+    "original_name": "original_file_name.pdf",  # 原始文件名，用于跟踪重命名历史
     "standard_name": "Computer Programming (2014) - 计算机编程.pdf",          # 用来识别和查找相关文件，对比
     "safe_title": "computer-programming-nljr-eriu7vr0lfb2",                 # 用来命名 json 文件和 md 文件
     "meta_json":"computer-programming-nljr-eriu7vr0lfb2.json",              # 存有更多书籍信息，而非处理信息
@@ -42,48 +41,15 @@ from batch_04_md import build_md
  
 """
 
-
 # ----------- 配置 -------------
 
 # 立即执行检查
 check_model_exists(OLLAMA_BASE_URL, OLLAMA_MODEL)
 
 # Processing JSON 文件路径
-PROCESSING_JSON_PATH = os.path.join(DATA_DIR, "processing.json")
-
-
-def get_base_dir():
-    """根据环境获取基础目录"""
-    default_ebook_path = "ebooks"
-    
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                all_configs = json.load(f)
-            
-            # 获取当前环境标识（优先级：环境变量 > 主机名）
-            env_name = os.environ.get('APP_ENV') or platform.node()
-            
-            # 查找匹配的环境配置
-            for key, value in all_configs.items():
-                if key == env_name:
-                    return value.get("EOOKS_PATH", default_ebook_path)
-                elif isinstance(value, dict) and value.get('hostname') == env_name:
-                    return value.get("EOOKS_PATH", default_ebook_path)
-            
-            # 如果没找到精确匹配，尝试模糊匹配主机名
-            for key, value in all_configs.items():
-                if isinstance(value, dict) and 'hostname' in value and value['hostname'] in env_name:
-                    return value.get("EOOKS_PATH", default_ebook_path)
-            
-            # 如果仍然没找到，使用默认配置（如果有）
-            if 'default' in all_configs:
-                return all_configs['default'].get("EOOKS_PATH", default_ebook_path)
-                   
-        except Exception as e:
-            logger.debug(f"加载配置文件时出错: {e}")
-    
-    return default_ebook_path
+PROCESSING_JSON_PATH = DATA_DIR / "processing.json"
+temporarily_file = LOG_DIR / "temporarily_files.txt"
+MD_DIR = WIKI_BASE_PATH
 
 def find_processed_file_info(filename: str) -> dict:
     """
@@ -96,7 +62,7 @@ def find_processed_file_info(filename: str) -> dict:
         dict: 匹配的条目信息，如果没有匹配项则返回空字典
     """
     # 如果processing.json文件不存在，则返回空字典
-    if not os.path.exists(PROCESSING_JSON_PATH):
+    if not PROCESSING_JSON_PATH.exists():
         return {}
     
     try:
@@ -121,7 +87,7 @@ def save_processing_info(processed_info: dict):
     processing_data = []
     
     # 如果processing.json文件存在，则读取现有数据
-    if os.path.exists(PROCESSING_JSON_PATH):
+    if PROCESSING_JSON_PATH.exists():
         try:
             processing_data = load_json_file(PROCESSING_JSON_PATH)
         except Exception as e:
@@ -247,7 +213,7 @@ def save_processing_info(processed_info: dict):
     except Exception as e:
         logger.error(f"写入 processing.json 时出错: {e}")
 
-def check_entry_exists(file_path: str, entry: str) -> bool:
+def check_entry_exists(file_path: Path, entry: str) -> bool:
     """
     检查文件中是否已存在要写入的条目
     
@@ -258,7 +224,7 @@ def check_entry_exists(file_path: str, entry: str) -> bool:
     Returns:
         bool: 如果文件中存在该条目返回True，否则返回False
     """
-    if not os.path.exists(file_path):
+    if not file_path.exists():
         return False
     
     try:
@@ -274,7 +240,7 @@ def check_entry_exists(file_path: str, entry: str) -> bool:
         return False
 
 ## 总的方法
-def main(base_dir=None):
+def main():
     """遍历目录并重命名PDF文件
     
     处理逻辑：
@@ -290,279 +256,286 @@ def main(base_dir=None):
     """
     
     # 如果没有通过参数传递base_dir，则尝试从配置文件加载
-    if base_dir is None:
-        base_dir = get_base_dir()
-        logger.info(f"使用配置文件加载的目录为：{base_dir}")
-        logger.info(f"生成内容存储至：{WIKI_BASE_PATH}")
+    base_dir = EOOKS_PATH
+    logger.info(f"使用配置文件加载的目录为：{base_dir}")
+    logger.info(f"生成内容存储至：{WIKI_BASE_PATH}")
+    if not base_dir.exists():
+        logger.error("未找到有效的目录路径，请检查配置文件")
+        return
     
     processed_count = 0
     renamed_count = 0
     
      # 遍历目录查找PDF文件
-    for root, _, files in os.walk(base_dir):
-        for src_file in files:
-            # 只处理PDF文件
-            if not src_file.lower().endswith('.pdf'):
-                continue
-            # 检查是否应该排除此文件（即是否为目标文件）
-            if is_target_file(src_file):
-                # logger.debug(f"跳过目标文件: {src_file}")
-                continue
-            
-            error_log_path = os.path.join(LOG_DIR, "no_title_files.txt")
-            if check_entry_exists(error_log_path, Path(src_file).name):
-                continue
-            
-            logger.info("="*100)
-            # 在所有处理之前，先根据文件名去和 processing.json 中的 standard_name 去匹配，如果有匹配值，表明之前处理过，可以获取所有状态值
-            processed_info = find_processed_file_info(src_file)
-            if not processed_info:
-                # 如果在processing.json中没有找到该文件的记录，则创建一个新条目
-                # 初始化所有必要字段，包括可能通过后续步骤填充的 norm_isbn 和 books_id
-                processed_info = {
-                    "status": {
-                        "rename_done": False,                   
-                        "parse_metadata": False,
-                        "request_google_api": False,
-                        "trans_toc": False,
-                        "build_md": False
-                    },
-                    "books_id": "",              # 来自 Google Books API 或生成的 NLJR-xxxxx 格式 ID
-                    "norm_isbn": "",             # 规范化的 ISBN，用于唯一标识书籍
-                    "standard_name": src_file,   # 原始文件名，作为匹配键
-                    "safe_title": "",            # 安全文件名（用于 JSON/MD 文件）
-                    "meta_json": "",             # 对应的元数据 JSON 文件名
-                    "md_file": "",               # 生成的 Markdown 展示文件名
-                    "toc_trans_xml":"",
-                    "keyinfo": {
-                        "is_book": True,        # 默认认为是书籍，有ISBN
-                        "has_toc": True,        # 默认认为是有书签的
-                    }
+    for src_file in base_dir.rglob("*.pdf"):
+        # 检查是否应该排除此文件（即是否为目标文件）
+        if is_target_file(src_file.name):
+            logger.debug(f"不属于目标文件，跳过: {src_file}")
+            continue
+        
+        if check_entry_exists(temporarily_file, src_file.name):
+            continue
+        
+        logger.info("="*100)
+        # 在所有处理之前，先根据文件名去和 processing.json 中的 standard_name 去匹配，如果有匹配值，表明之前处理过，可以获取所有状态值
+        processed_info = find_processed_file_info(src_file.name)
+        if not processed_info:
+            # 如果在processing.json中没有找到该文件的记录，则创建一个新条目
+            # 初始化所有必要字段，包括可能通过后续步骤填充的 norm_isbn 和 books_id
+            processed_info = {
+                "status": {
+                    "rename_done": False,                   
+                    "parse_metadata": False,
+                    "request_google_api": False,
+                    "trans_toc": False,
+                    "build_md": False
+                },
+                "books_id": "",              # 来自 Google Books API 或生成的 NLJR-xxxxx 格式 ID
+                "norm_isbn": "",             # 规范化的 ISBN，用于唯一标识书籍
+                "original_name": src_file.name,  # 原始文件名，用于跟踪重命名历史
+                "standard_name": src_file.name,   # 标准文件名，作为匹配键，标准格式为 {title} ({year}){edition_part} - {title_zh}.pdf
+                "safe_title": "",            # 安全文件名（用于 JSON/MD 文件）
+                "meta_json": "",             # 对应的元数据 JSON 文件名
+                "md_file": "",               # 生成的 Markdown 展示文件名
+                "toc_trans_xml":"",
+                "keyinfo": {
+                    "is_book": True,        # 默认认为是书籍，有ISBN
+                    "has_toc": True,        # 默认认为是有书签的
                 }
-                # 保存新条目到processing.json
-                save_processing_info(processed_info)
+            }
+            # save_processing_info(processed_info) !!注：这里不能保存，否则会多出很多空 books_id 的条目
+        else:
+            # 如果找到了已有的记录，确保它有 original_name 字段
+            if "original_name" not in processed_info:
+                # 对于旧记录，我们无法知道确切的原始名称，所以使用 standard_name 作为后备
+                processed_info["original_name"] = processed_info.get("standard_name", src_file.name)
+                # save_processing_info(processed_info) !!注：这里不能保存，否则会多出很多空 books_id 的条目
 
-            # 后面添加一个不是书籍的列表，供解析，避免调用大模型、api去解析浪费时间
-            if processed_info.get("keyinfo", {}).get("is_book", True):
-                # 添加书籍列表
-                # BOOK_LIST.append(src_file)
-                pass
-            else:
-                # 添加非书籍列表
-                # NON_BOOK_LIST.load(src_file)
+        # 后面添加一个不是书籍的列表，供解析，避免调用大模型、api去解析浪费时间
+        if processed_info.get("keyinfo", {}).get("is_book", True):
+            # 添加书籍列表
+            # BOOK_LIST.append(src_file)
+            pass
+        else:
+            # 添加非书籍列表
+            # NON_BOOK_LIST.load(src_file)
+            continue
+
+        # 获取状态信息
+        status = processed_info.get("status", {})
+        
+        meta = {}
+        
+        # 初始化总计数器和时间统计
+        total_start_time = time.time()
+        phase1_time = 0  # 解析PDF元数据阶段时间
+        phase2_time = 0  # 重命名文件阶段时间
+        phase3_time = 0  # 翻译目录阶段时间
+        phase4_time = 0  # 生成MD文件阶段时间
+        
+        ## ----------- 1、先解析 pdf，生成 meta.json -----------
+        phase1_start = time.time()  # 阶段1开始时间
+        # 调用 cip_parser 中的方法，获取新文件名。只管获取，如果失败则会记录在跳过列表中
+        logger.info(f"----------- 1、先解析 pdf，生成 meta.json -----------")
+        meta_json_path = WIKI_BASE_PATH / "meta"
+        # 检查是否已经解析过元数据
+        if status.get("parse_metadata", False):
+            # 直接使用已有的meta_json文件
+            meta_json_path = WIKI_BASE_PATH / "meta" / processed_info.get("meta_json")
+            logger.info(f"使用已存在的元数据文件: {meta_json_path.name}")
+            meta = load_json_file(meta_json_path)
+            processed_info["books_id"] = meta.get('id', '')
+            processed_info["norm_isbn"] = meta.get("isbn", False)
+            processed_info["standard_name"] = meta.get("filename") # 每次都用元数据文件中的文件名；如果修改了pdf文件名，同步修改meta文件中的文件名
+            processed_info["safe_title"] = get_safe_title(meta)
+            save_processing_info(processed_info)
+        else:
+            # 需要重新解析PDF文件
+            logger.info(f"处理基础文件: {src_file.name}")
+            processed_info = cip_parser(src_file, processed_info)
+            if not processed_info:
+                cannot_be_processed_temporarily(src_file.name, "没有版权信息")
                 continue
+            if not processed_info.get("safe_title"):
+                # 如果解析完成了，但是没有找到标题，则跳过。原因是 json 文件名来自 safe_title，而 safe_title 来自于标题名
+                # 将没有标题的文件名写入单独的文件中备查
+                cannot_be_processed_temporarily(src_file.name, "没有标题")
+                continue
+            meta_json_path = WIKI_BASE_PATH / "meta" / processed_info.get("meta_json")
+            # save_processing_info(processed_info) !! 在没有获取标准名之前保存，都会产生两条记录，一条原文件名肯定没有books_id
 
-            # 获取状态信息
-            status = processed_info.get("status", {})
-            
-            meta = {}
-            # 原待处理文件全路径，后续如果要重命名使用
-            src_pdf_path = os.path.join(root, src_file)
-            base_file_dir = Path(src_pdf_path).parent
-            src_file_name= Path(src_file).name
-            base_file_name= Path(src_file).stem
-            
-            # 初始化总计数器和时间统计
-            total_start_time = time.time()
-            phase1_time = 0  # 解析PDF元数据阶段时间
-            phase2_time = 0  # 重命名文件阶段时间
-            phase3_time = 0  # 翻译目录阶段时间
-            phase4_time = 0  # 生成MD文件阶段时间
-            
-            ## ----------- 1、先解析 pdf，生成 meta.json -----------
-            phase1_start = time.time()  # 阶段1开始时间
-            # 调用 cip_parser 中的方法，获取新文件名。只管获取，如果失败则会记录在跳过列表中
-            logger.info(f"----------- 1、先解析 pdf，生成 meta.json -----------")
-            # 检查是否已经解析过元数据
-            if status.get("parse_metadata", False):
-                # 直接使用已有的meta_json文件
-                meta_json_path = os.path.join(WIKI_BASE_PATH, "meta",  processed_info.get("meta_json"))
-                logger.info(f"使用已存在的元数据文件: {meta_json_path}")
+            if meta_json_path.is_file():  # 如果还是目录，说明还没解析赋值
                 meta = load_json_file(meta_json_path)
-                processed_info["books_id"] = meta.get('id', '')
-                processed_info["norm_isbn"] = meta.get("isbn", False)
+                # 更新ISBN和books_id信息
+                norm_isbn = meta.get('isbn', '')
+                books_id = meta.get('id', '') or meta.get('books_id', '')
+                
+                # 如果不是书，肯定没有 ISBN，则跳过。大概率要通过手动来设置
+                if processed_info.get("keyinfo", {}).get("is_book", True):
+                    if norm_isbn:
+                        processed_info["norm_isbn"] = norm_isbn
+                        processed_info["status"]["handle_isbn"] = True
+                    else:
+                        # 没有ISBN的情况下，设置handle_isbn为True，并确保books_id存在
+                        processed_info["status"]["handle_isbn"] = True
+                    
+                if books_id:
+                    processed_info["books_id"] = books_id
+                else:
+                    # 如果既没有ISBN也没有books_id，则生成一个
+                    alphabet = string.ascii_letters + string.digits
+                    books_id = "NLJR-"+''.join(secrets.choice(alphabet) for _ in range(12))
+                    processed_info["books_id"] = books_id
+                
+                # 更新状态：元数据解析完成
+                processed_info["status"]["parse_metadata"] = True
                 processed_info["standard_name"] = meta.get("filename")
+                processed_info["meta_json"] = meta_json_path.name
                 processed_info["safe_title"] = get_safe_title(meta)
+                # 保存更新后的状态
                 save_processing_info(processed_info)
             else:
-                # 需要重新解析PDF文件
-                logger.info(f"处理基础文件: {src_file_name}")
-                processed_info = cip_parser(src_pdf_path, processed_info)
-                if not processed_info:
-                    exist = check_entry_exists(error_log_path,src_file_name);
-                    if not exist:
-                        logger.error(f"跳过文件 (没有版权信息): {src_file_name}")
-                        with open(error_log_path, "a", encoding="utf-8") as f:
-                            f.write(f"{src_file_name}\n")
-                        continue
-                
-                if not processed_info.get("safe_title"):
-                    # 如果解析完成了，但是没有找到标题，则跳过。原因是 json 文件名来自 safe_title，而 safe_title 来自于标题名
-                    # 将没有标题的文件名写入单独的文件中备查
-                    exist = check_entry_exists(error_log_path,src_file_name);
-                    if not exist:
-                        logger.error(f"跳过文件 (没有标题): {src_file_name}")
-                        with open(error_log_path, "a", encoding="utf-8") as f:
-                            f.write(f"{src_file_name}\n")
-                        continue
-  
-                save_processing_info(processed_info) # 里面先保存一下，后面稳定后再只保存一次
-                
-                meta_json_path = os.path.join(WIKI_BASE_PATH, "meta",  processed_info.get("meta_json"))
-                if meta_json_path:  # 确保解析成功
-                    meta = load_json_file(meta_json_path)
-                    # 更新ISBN和books_id信息
-                    norm_isbn = meta.get('isbn', '')
-                    books_id = meta.get('id', '') or meta.get('books_id', '')
-                    
-                    # 如果不是书，肯定没有 ISBN，则跳过。大概率要通过手动来设置
-                    if processed_info.get("keyinfo", {}).get("is_book", True):
-                        if norm_isbn:
-                            processed_info["norm_isbn"] = norm_isbn
-                            processed_info["status"]["handle_isbn"] = True
-                        else:
-                            # 没有ISBN的情况下，设置handle_isbn为True，并确保books_id存在
-                            processed_info["status"]["handle_isbn"] = True
-                        
-                    if books_id:
-                        processed_info["books_id"] = books_id
-                    else:
-                        # 如果既没有ISBN也没有books_id，则生成一个
-                        alphabet = string.ascii_letters + string.digits
-                        books_id = "NLJR-"+''.join(secrets.choice(alphabet) for _ in range(12))
-                        processed_info["books_id"] = books_id
-                    
-                    # 更新状态：元数据解析完成
-                    processed_info["status"]["parse_metadata"] = True
-                    processed_info["standard_name"] = meta.get("filename")
-                    processed_info["meta_json"] = os.path.basename(meta_json_path)
-                    processed_info["safe_title"] = get_safe_title(meta)
-                    # 保存更新后的状态
-                    save_processing_info(processed_info)
-                else:
-                    logger.debug(f"元数据解析失败: {src_file}")
-                    # 可能需要在这里处理失败情况，比如跳过当前文件
-                    continue
-            
-            phase1_end = time.time()  # 阶段1结束时间
-            phase1_time += (phase1_end - phase1_start)  # 累加阶段1时间
-            
-            ## ----------- 2、再根据 meta.json 重命名 pdf 文件及相关文件 -----------
-            phase2_start = time.time()  # 阶段2开始时间
-            logger.info(f"----------- 2、再根据 meta.json 重命名 pdf 文件及相关文件 -----------")
-            new_file_path = os.path.join(base_file_dir, meta.get('filename'))
-            
+                logger.debug(f"元数据解析失败: {src_file}")
+                # 可能需要在这里处理失败情况，比如跳过当前文件
+                continue
+        
+        phase1_end = time.time()  # 阶段1结束时间
+        phase1_time += (phase1_end - phase1_start)  # 累加阶段1时间
+        
+        ## ----------- 2、再根据 meta.json 重命名 pdf 文件及相关文件 -----------
+        phase2_start = time.time()  # 阶段2开始时间
+        logger.info(f"----------- 2、再根据 meta.json 重命名 pdf 文件及相关文件 -----------")
+        new_file = Path(src_file.parent / meta.get('filename'))
+        
+                # 检查是否启用了重命名功能
+        if not RENAME_PDF_FILES:
+            logger.debug(f"重命名功能已禁用，跳过重命名文件 {src_file.name}")
+        else:
             # 检查是否已经完成重命名
             if status.get("rename_done", False):
                 if processed_info.get("standard_name") :
                     logger.debug(f"文件 {src_file} 已经完成重命名，跳过重命名步骤")
-            elif status.get("rename_done", False) == False and new_file_path != src_pdf_path:
-                os.rename(src_pdf_path, new_file_path)
-                success = os.path.isfile(new_file_path)
-                if success:
+            elif status.get("rename_done", False) == False and new_file != src_file:
+                try:
+                    src_file.rename(new_file)
+                except OSError as e:
+                    if e.errno == 36:  # File name too long
+                        cannot_be_processed_temporarily(src_file.name, "文件名过长")
+                        continue
+                if new_file.is_file():
                     renamed_count += 1
                     processed_count += 1
                     # 更新状态：重命名完成
                     processed_info["status"]["rename_done"] = True
                     # 保存更新后的状态
                     save_processing_info(processed_info)
-                else:
-                    logger.debug(f"重命名失败: {src_pdf_path}")
-
-            # 处理相关文件（带后缀的文件）
-            #base_name = os.path.splitext(original_filename)[0]  # 基础文件名（不含扩展名）
-            related_renamed_count = rename_related_pdfs(base_file_dir, src_file_name, processed_info["standard_name"])
-            renamed_count += related_renamed_count
-            # repo_related_renamed_count=rename_related_pdfs("/Volumes/personal_folder/Resources/Library/EBooks/翻译库/对比翻译", src_file, new_filename)
-            # renamed_count += repo_related_renamed_count
-            phase2_end = time.time()  # 阶段2结束时间
-            phase2_time += (phase2_end - phase2_start)  # 累加阶段2时间
-            
-            ## ----------- 3、如果 pdf 有书目，获取书目，并翻译成中文 -----------
-            phase3_start = time.time()  # 阶段3开始时间
-            logger.info(f"----------- 3、如果 pdf 有书目，获取书目，并翻译成中文 -----------")
-            has_toc = True
-            if processed_info.get("trans_toc","") == False: # 如果没有处理过目录，才需要判断是否有书签，否则总是会卡1～2秒
-                if os.path.isfile(new_file_path):
-                    has_toc = has_bookmarks(new_file_path)
-                else:
-                    has_toc = False
-                    logger.info(f"文件 {new_file_path} 不存在，跳过目录翻译步骤")
-            
-            # 检查是否已经完成目录翻译
-            if has_toc:
-                check_tocxml = False
-                if status.get("trans_toc", False):
-                    toc_trans_xml = os.path.join(WIKI_BASE_PATH, "toc",f"{processed_info.get('books_id')[-12:]}_trans.xml")
-                    if os.path.isfile(toc_trans_xml):
-                        logger.info(f"文件 {src_file} 已经完成目录翻译，并且书目xml文件已存在，跳过翻译步骤")
-                        processed_info["toc_trans_xml"] = os.path.basename(toc_trans_xml) 
-                        save_processing_info(processed_info)
-                        check_tocxml = True
-                
-                if check_tocxml == False:
-                    if os.path.isfile(new_file_path):
-                        toc_trans_xml = translate_toc(new_file_path, processed_info["books_id"][-12:]) 
-                        # 更新状态：目录翻译完成
-                        if os.path.isfile(toc_trans_xml):  # 确保翻译成功
-                            processed_info["status"]["trans_toc"] = True
-                            processed_info["toc_trans_xml"] = os.path.basename(toc_trans_xml) 
-                            save_processing_info(processed_info)
-                            check_tocxml = True
-                    else:
-                        logger.warn(f"：{new_file_path} 不存在，跳过目录翻译步骤")
-
-                # 如果有相关翻译完成的文件，写入新的中文目录
-                if check_tocxml:
-                    toc_trans_xml = os.path.join(WIKI_BASE_PATH, "toc",processed_info.get('toc_trans_xml'))
-                    if os.path.isfile(toc_trans_xml):
-                        relate_files = find_related_files(base_file_dir, base_file_name)
-                        for related_pdf in relate_files:
-                            if is_target_file(related_pdf):
-                                pdf_import_toc_xml(toc_trans_xml,related_pdf)
-                                continue
             else:
-                processed_info["keyinfo"]["has_toc"] = False
-            phase3_end = time.time()  # 阶段3结束时间
-            phase3_time += (phase3_end - phase3_start)  # 累加阶段3时间
+                logger.debug(f"重命名文件 {src_file} 发生未知情况，请查明原因:{processed_info}")
+
+        # 处理相关文件（带后缀的文件）
+        related_renamed_count = rename_related_pdfs(src_file.parent, src_file, processed_info["standard_name"])
+        renamed_count += related_renamed_count
+        # repo_related_renamed_count=rename_related_pdfs("/Volumes/personal_folder/Resources/Library/EBooks/翻译库/对比翻译", src_file, new_filename)
+        # renamed_count += repo_related_renamed_count
+        phase2_end = time.time()  # 阶段2结束时间
+        phase2_time += (phase2_end - phase2_start)  # 累加阶段2时间
+        
+        ## ----------- 3、如果 pdf 有书目，获取书目，并翻译成中文 -----------
+        phase3_start = time.time()  # 阶段3开始时间
+        logger.info(f"----------- 3、如果 pdf 有书目，获取书目，并翻译成中文 -----------")
+        prefix = processed_info.get('books_id')[-12:]
+        toc_trans_xml = TOC_DIR / f"{prefix}_trans.xml"
+        has_toc = True
+        if processed_info.get("trans_toc","") == False: # 如果没有处理过目录，才需要判断是否有书签，否则总是会卡1～2秒
+            if new_file.is_file():
+                has_toc = has_bookmarks(new_file)
+            else:
+                has_toc = False
+                logger.info(f"文件 {new_file} 不存在目录，跳过翻译步骤")
+        
+        # 检查是否已经完成目录翻译
+        if has_toc:
+            check_tocxml = False
+            if status.get("trans_toc", False) and toc_trans_xml.is_file():
+                logger.info(f"文件 {src_file} 已经完成目录翻译，并且书目xml文件已存在，跳过翻译步骤")
+                processed_info["toc_trans_xml"] = toc_trans_xml.name
+                save_processing_info(processed_info)
+                check_tocxml = True
             
-            ## ----------- 4、制作 md 文件，方便发布查看和编辑 -----------
-            phase4_start = time.time()  # 阶段4开始时间
-            logger.info(f"----------- 4、制作 md 文件，方便发布查看和编辑文 -----------")
-            # 检查是否已经生成MD文件
-            MD_DIR = WIKI_BASE_PATH
-            check_md = False
-            if status.get("build_md", False):
-                md_file = os.path.join(MD_DIR, f"{processed_info.get('safe_title')}.md")
-                if os.path.isfile(md_file):
-                    logger.info(f"文件 {src_file} 已经生成 Markdown 文件 {os.path.basename(md_file)}，跳过生成步骤")
-                    processed_info["status"]["build_md"] = True
-                    processed_info["md_file"] = os.path.basename(md_file)
+            if check_tocxml == False and new_file.is_file():
+                toc_trans_xml = translate_toc(new_file, prefix) 
+                # 更新状态：目录翻译完成
+                if toc_trans_xml.is_file():  # 确保翻译成功
+                    processed_info["status"]["trans_toc"] = True
+                    processed_info["toc_trans_xml"] = toc_trans_xml.name 
                     save_processing_info(processed_info)
-                    check_md = True
+                    check_tocxml = True
                 else:
-                    logger.warn(f"process 记录中的文件 {md_file} 不存在")
+                    logger.debug(f"目录翻译文件不存在，翻译失败: {toc_trans_xml}")
+
+            # 如果有相关翻译完成的文件，写入新的中文目录
+            if check_tocxml and toc_trans_xml.is_file():
+                relate_files = find_related_files(src_file.parent, src_file.stem)
+                for related_pdf in relate_files:
+                    if is_target_file(related_pdf.name):
+                        pdf_import_toc_xml(toc_trans_xml,related_pdf)
+                        continue
+        else:
+            processed_info["keyinfo"]["has_toc"] = False
             
-            if check_md == False:
-                mdpath = build_md(meta)
-                if os.path.isfile(mdpath):
-                    # 更新状态：MD文件生成完成
-                    processed_info["status"]["build_md"] = True
-                    processed_info["md_file"] = os.path.basename(mdpath)
-                    save_processing_info(processed_info)
-                    logger.info(f"[info] 全流程跑完，文件 {meta.get('filename')} 生成 Markdown 文件成功 [ {processed_info.get('safe_title')}.md ]")
-            phase4_end = time.time()  # 阶段4结束时间
-            phase4_time += (phase4_end - phase4_start)  # 累加阶段4时间
-            
-            if check_md == False:
-                # 计算总耗时
-                total_end_time = time.time()
-                total_time = total_end_time - total_start_time
-                # 输出各阶段耗时统计
-                logger.info(f"BOOK_ID:[ {processed_info.get("books_id")} ] 处理完成统计：\n  阶段1(解析PDF元数据)耗时 {phase1_time:.2f} 秒，\n  阶段2(重命名文件)耗时 {phase2_time:.2f} 秒，\n  阶段3(翻译目录)耗时 {phase3_time:.2f} 秒，\n  阶段4(生成MD文件)耗时 {phase4_time:.2f} 秒，\n  总耗时 {total_time:.2f} 秒")
+        phase3_end = time.time()  # 阶段3结束时间
+        phase3_time += (phase3_end - phase3_start)  # 累加阶段3时间
+        
+        ## ----------- 4、制作 md 文件，方便发布查看和编辑 -----------
+        phase4_start = time.time()  # 阶段4开始时间
+        logger.info(f"----------- 4、制作 md 文件，方便发布查看和编辑文 -----------")
+        # 检查是否已经生成MD文件
+        check_md = False
+        if status.get("build_md", False):
+            md_file = MD_DIR / f"{processed_info.get('safe_title')}.md"
+            if md_file.is_file(): # 无论如何都能覆盖md文件，因为可能编辑过，除非没用自己删掉
+                logger.info(f"文件 {src_file} 已经生成 Markdown 文件 {md_file.name}，跳过生成步骤")
+                processed_info["status"]["build_md"] = True
+                processed_info["md_file"] = md_file.name
+                save_processing_info(processed_info)
+                check_md = True
+            else:
+                logger.warn(f"processing.json 记录中的文件 {md_file.name} 不存在")
+        
+        if check_md == False:
+            md_file = build_markdown(meta)
+            if md_file.is_file():
+                # 更新状态：MD文件生成完成
+                processed_info["status"]["build_md"] = True
+                processed_info["md_file"] = md_file.name
+                save_processing_info(processed_info)
+                logger.info(f"[info] 全流程跑完，文件 {meta.get('filename')} 生成 Markdown 文件成功 [ {processed_info.get('safe_title')}.md ]")
+        phase4_end = time.time()  # 阶段4结束时间
+        phase4_time += (phase4_end - phase4_start)  # 累加阶段4时间
+        
+        if check_md == False:
+            # 计算总耗时
+            total_end_time = time.time()
+            total_time = total_end_time - total_start_time
+            # 输出各阶段耗时统计
+            logger.info(f"BOOK_ID:[ {processed_info.get("books_id")} ] 处理完成统计：\n  阶段1(解析PDF元数据)耗时 {phase1_time:.2f} 秒，\n  阶段2(重命名文件)耗时 {phase2_time:.2f} 秒，\n  阶段3(翻译目录)耗时 {phase3_time:.2f} 秒，\n  阶段4(生成MD文件)耗时 {phase4_time:.2f} 秒，\n  总耗时 {total_time:.2f} 秒")
                 
     logger.debug(f"处理完成。总共处理了 {processed_count} 个文件，重命名了 {renamed_count} 个文件。")
     
+def cannot_be_processed_temporarily(entry: str, reason: str = ""):
+    """
+    将无法处理的文件记录到暂时无法处理的记录文件中
+    
+    Args:
+        temporarily_file: 暂时无法处理的记录文件路径
+        entry: 要记录的文件名
+        reason: 无法处理的原因（用于日志记录）
+    """
+    # 检查文件是否已存在于暂时无法处理的记录文件中
+    if not check_entry_exists(temporarily_file, entry):
+        logger.error(f"跳过文件 ({reason}): {entry}")
+        with open(temporarily_file, "a", encoding="utf-8") as f:
+            f.write(f"{entry}\n")
 
 if __name__ == "__main__":
-    main(None)
+    main()

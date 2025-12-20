@@ -4,13 +4,12 @@
 用法: python pdf2meta_ollama.py xxx.pdf
 输出: output/xxx.json  +  output/the-art-of-xxx.md
 """
-import fitz, re, json, os, sys, requests
-from slugify import slugify
+import fitz, re, json, sys, requests
 from rapidocr_onnxruntime import RapidOCR
 from typing import Dict, List, Union, Any
 from pathlib import Path
 # 导入公共模型检查工具
-from _utils import logger, check_model_exists, get_pdf_page_count, get_safe_title, get_text_md5
+from _utils import logger, check_model_exists, get_pdf_page_count, get_safe_title, get_text_md5, deep_clean_title, has_explanatory_note
 from _utils import OLLAMA_BASE_URL, OLLAMA_MODEL, WIKI_BASE_PATH, DEEPSEEK_API_KEY,PROXIES
 
 # 立即执行检查
@@ -20,19 +19,17 @@ check_model_exists(OLLAMA_BASE_URL, OLLAMA_MODEL)
 OCR_DPI    = 200
 MAX_FILENAME_LENGTH = 255 # 生成的文件名超长处理
 
-# 脚本所在路径
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # 基于基础目录定义存储路径
-COVERS_DIR = os.path.join(WIKI_BASE_PATH, "covers")
-META_DIR = os.path.join(WIKI_BASE_PATH, "meta")
+COVERS_DIR = WIKI_BASE_PATH / "covers"
+META_DIR = WIKI_BASE_PATH / "meta"
 MD_DIR = WIKI_BASE_PATH
 
-if not os.path.exists(MD_DIR):
+if not MD_DIR.exists():
     raise SystemExit(1)
 
 # -------------- OCR + 版权页定位 --------------
 ocr_engine = RapidOCR()
-def find_copyright_page(pdf_path):
+def find_copyright_page(pdf_path: Path):
     doc = fitz.open(pdf_path)
     
     # 限制搜索范围为前10页或总页数（取较小值）
@@ -571,7 +568,7 @@ def parse_metadata_gogl(isbn=None):
         return {k: v for k, v in result.items() if v is not None}
 
     except Exception as e:
-        logger.warn("[warn] Google Books 抓取失败:", e)
+        logger.warn("Google Books 抓取失败:" + str(e))
         return {}
 
 def parse_metadata(text, pdf_path):
@@ -657,10 +654,10 @@ def parse_metadata(text, pdf_path):
         else:
             custom_prompt = "当前翻译内容是书籍标题，要求做到信雅达。"
         title_zh = translate_with_deepseek_api(full_title,custom_prompt) or translate_with_llm(full_title)
-        if len(title_zh) > 50:
+        if has_explanatory_note(full_title, title_zh):
+            logger.warn(f"中文文件名{title_zh}有翻译注释，将使用本地大模型重新翻译")
             title_zh = translate_with_llm(full_title,"请将以下书籍名称翻译成简体中文，要求做到信雅达，仅输出译文，禁止任何解释、括号、引号、备注、说明、标点扩展：")
-        else:
-            meta["title_zh"] = title_zh
+        meta["title_zh"] = deep_clean_title(title_zh) # 出现过生成的文件名出现连续空格的问题
         
         meta["filename"] = build_filename(meta)
         meta["filenameMD5"] = get_text_md5(title)
@@ -683,7 +680,7 @@ def parse_metadata(text, pdf_path):
     return meta
 
 # -------------- 翻译 --------------
-def translate_with_llm(text, custom_prompt = TRANS_USR_PROMPT):
+def translate_with_llm(text:str, custom_prompt = TRANS_USR_PROMPT):
     """
     使用本地 Ollama 模型进行翻译
     """
@@ -709,7 +706,7 @@ def translate_with_llm(text, custom_prompt = TRANS_USR_PROMPT):
         logger.warn(f"LLM翻译失败: {e}")
         return text
 
-def translate_with_deepseek_api(text:str,extra_prompt = ""):
+def translate_with_deepseek_api(text:str, extra_prompt = ""):
     """
     使用 DeepSeek API 进行翻译
     """
@@ -732,20 +729,21 @@ def translate_with_deepseek_api(text:str,extra_prompt = ""):
     except Exception as e:
         logger.error(f"翻译失败: {e}")
 
-def save_meta_json(meta) -> str:
+def save_meta_json(meta) -> Path:
     """
     将元数据保存为JSON文件
     """
     safe_title = get_safe_title(meta)
     
     if not safe_title:
-        return ""
+        return META_DIR / "no_saft_title.json"
     
     # 修改JSON文件名为与MD文件名一致的格式
-    json_path = os.path.join(META_DIR, f"{safe_title}.json")
+    json_path = META_DIR / f"{safe_title}.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
-    logger.info("已生成元数据文件" + os.path.basename(json_path))    
+    logger.info("已生成元数据文件" + json_path.name)
+    logger.debug("元数据:" + str(meta))
     return json_path
 
 def merge_categories(meta: Dict[str, object]) -> str:
@@ -847,7 +845,6 @@ def build_filename(meta: Dict[str, object]) -> str:
     logger.info("已生成有效文件名：" + filename)
     return filename
 
-
 def shorten_filename_by_segments(title: str, title_zh: str, year: str, edition_part: str, 
                                 max_length: int = MAX_FILENAME_LENGTH) -> str:
     """
@@ -912,7 +909,7 @@ def shorten_filename_by_segments(title: str, title_zh: str, year: str, edition_p
     return f"Book{year_edition_part}.pdf"
 
 # -------------- 主流程 --------------
-def cip_parser(pdf_path: str, processed_info: Dict[str, Any]) -> Dict:    
+def cip_parser(pdf_path: Path, processed_info: Dict[str, Any]) -> Dict:    
     logger.info(f"正在定位版权页[ {pdf_path} ] …")
     text = find_copyright_page(pdf_path)
     # log(f"[debug] 版权页内容: {text}")
@@ -933,13 +930,11 @@ def cip_parser(pdf_path: str, processed_info: Dict[str, Any]) -> Dict:
             logger.info(f"文本未加密，找不到标题，请手动处理")
     
     json_path = save_meta_json(meta)
-    if json_path:
+    if json_path.is_file():
         processed_info["status"]["parse_metadata"] = True
-        processed_info["meta_json"] = os.path.basename(json_path)
+        processed_info["meta_json"] = json_path.name
         processed_info["safe_title"] = get_safe_title(meta)
     return processed_info
-
-
 
 def detect_and_decrypt_mixed_text(text: str) -> str:
     """
@@ -951,8 +946,6 @@ def detect_and_decrypt_mixed_text(text: str) -> str:
     Returns:
         str: 解密后的完整文本
     """
-    import requests
-    import json
     
     # 分割文本为段落/行
     lines = text.split('\n')
@@ -1005,7 +998,6 @@ def detect_and_decrypt_mixed_text(text: str) -> str:
             processed_lines.append(line)
     
     return '\n'.join(processed_lines)
-
 
 def decrypt_caesar_shift(encrypted_text: str) -> str:
     """

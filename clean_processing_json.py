@@ -6,7 +6,6 @@
 """
 
 import json
-import os
 from pathlib import Path
 from batch import PROCESSING_JSON_PATH
 
@@ -15,16 +14,14 @@ def clean_processing_json():
     清理 processing.json 文件中 books_id 为空或者 safe_title 为空的条目
     """
     
-    json_path = Path(PROCESSING_JSON_PATH)
-    
     # 检查文件是否存在
-    if not json_path.exists():
-        print(f"错误: 找不到文件 {json_path}")
+    if not PROCESSING_JSON_PATH.exists():
+        print(f"错误: 找不到文件 {PROCESSING_JSON_PATH}")
         return
     
     # 读取 processing.json 文件
     try:
-        with open(json_path, 'r', encoding='utf-8') as f:
+        with open(PROCESSING_JSON_PATH, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except json.JSONDecodeError as e:
         print(f"错误: JSON 文件格式不正确: {e}")
@@ -35,6 +32,50 @@ def clean_processing_json():
     
     # 统计原始条目数量
     original_count = len(data)
+    
+    # 检查重复的 books_id 和 isbn
+    books_id_map = {}
+    isbn_map = {}
+    
+    for i, entry in enumerate(data):
+        books_id = entry.get("books_id", "")
+        isbn = entry.get("isbn", "")
+        
+        if books_id:
+            if books_id not in books_id_map:
+                books_id_map[books_id] = []
+            books_id_map[books_id].append((i, entry))
+            
+        if isbn:
+            if isbn not in isbn_map:
+                isbn_map[isbn] = []
+            isbn_map[isbn].append((i, entry))
+    
+    # 显示重复的 books_id
+    duplicate_books_id_found = False
+    for books_id, entries in books_id_map.items():
+        if len(entries) > 1:
+            if not duplicate_books_id_found:
+                print("\n发现重复的 books_id:")
+                duplicate_books_id_found = True
+                
+            print(f"\nbooks_id '{books_id}' 出现 {len(entries)} 次:")
+            for index, entry in entries:
+                standard_name = entry.get("standard_name", "Unknown")
+                print(f"  - 条目 {index+1}: 文件 {standard_name}")
+                
+    # 显示重复的 isbn
+    duplicate_isbn_found = False
+    for isbn, entries in isbn_map.items():
+        if len(entries) > 1:
+            if not duplicate_isbn_found:
+                print("\n发现重复的 isbn:")
+                duplicate_isbn_found = True
+                
+            print(f"\nisbn '{isbn}' 出现 {len(entries)} 次:")
+            for index, entry in entries:
+                standard_name = entry.get("standard_name", "Unknown")
+                print(f"  - 条目 {index+1}: 文件 {standard_name}")
     
     # 筛选出有效的条目（books_id 和 safe_title 都不为空）
     cleaned_data = []
@@ -71,17 +112,17 @@ def clean_processing_json():
     
     # 保存清理后的数据
     try:
-        backup_path = json_path.with_suffix('.json.backup')
+        backup_path = PROCESSING_JSON_PATH.with_suffix('.json.backup')
         # 创建备份
-        with open(json_path, 'r', encoding='utf-8') as original, \
+        with open(PROCESSING_JSON_PATH, 'r', encoding='utf-8') as original, \
              open(backup_path, 'w', encoding='utf-8') as backup:
             backup.write(original.read())
         
         # 写入清理后的数据
-        with open(json_path, 'w', encoding='utf-8') as f:
+        with open(PROCESSING_JSON_PATH, 'w', encoding='utf-8') as f:
             json.dump(cleaned_data, f, ensure_ascii=False, indent=2)
         
-        print("清理完成!")
+        print("\n清理完成!")
         print(f"原始条目数量: {original_count}")
         print(f"清理后条目数量: {cleaned_count}")
         print(f"移除的条目数量: {removed_count}")

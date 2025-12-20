@@ -10,7 +10,6 @@ import re
 import json
 import inspect
 import platform
-from datetime import datetime
 from typing import Dict, Any
 import fitz  # PyMuPDF
 import hashlib
@@ -19,86 +18,49 @@ from slugify import slugify
 from difflib import SequenceMatcher
 import logging
 import sys
-
+from logging.handlers import TimedRotatingFileHandler
+from dotenv import load_dotenv
 
 # ==============================
 # 配置（需要在导入前设置这些变量）
 # ==============================
-# 从配置文件加载这些值，如果配置文件不存在则使用默认值
-OLLAMA_BASE_URL = "http://localhost:11434"          # Ollama 服务地址
-OLLAMA_MODEL    = "qwen2.5:7b"       # 默认模型
-DEEPSEEK_API_KEY= ""
-OLLAMA_TIMEOUT  = 300
-MAX_RETRIES     = 3
-TARGET_SUFFIXES = [
-        '_dual.pdf', '_translated.pdf', '_dual_智谱4Flash.pdf', '_translated_智谱4Flash.pdf',
-        '_dual_Kimi+DeepSeek.pdf', '_translated_Kimi+DeepSeek.pdf', '_translated_Kimi+Qwen.pdf',
-        '_dual_Kimi+Qwen.pdf', '.no_watermark.zh-CN.mono.pdf', '.no_watermark.zh-CN.dual.pdf',
-        '_zh.pdf', '_cn.pdf', '_final.pdf', '_bilingual.pdf'
-    ]
-PROXIES={}
+# 加载 .env 文件
+load_dotenv()
+
+# 从环境变量加载这些值，如果环境变量不存在则使用默认值
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")          # Ollama 服务地址
+OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")       # 默认模型
+DEEPSEEK_API_KEY= os.getenv("DEEPSEEK_API_KEY", "sk-xxxxxxxxxxx")
+OLLAMA_TIMEOUT  = int(os.getenv("OLLAMA_TIMEOUT", "300"))
+MAX_RETRIES     = int(os.getenv("MAX_RETRIES", "3"))
+TARGET_SUFFIXES = os.getenv("TARGET_SUFFIXES", "_dual.pdf,_translated.pdf,_dual_智谱4Flash.pdf,_translated_智谱4Flash.pdf,_dual_Kimi+DeepSeek.pdf,_translated_Kimi+DeepSeek.pdf,_translated_Kimi+Qwen.pdf,_dual_Kimi+Qwen.pdf,.no_watermark.zh-CN.mono.pdf,.no_watermark.zh-CN.dual.pdf,_zh.pdf,_cn.pdf,_final.pdf,_bilingual.pdf").split(",")
+RENAME_PDF_FILES = os.getenv("RENAME_PDF_FILES", "true").lower() == "true"  # 是否重命名PDF文件
 
 # ==============================
 # 2. 路径与日志
 # ==============================
-SCRIPT_DIR      = Path(__file__).parent.resolve()
-CONFIG_FILE      = SCRIPT_DIR / "config.json"
+SCRIPT_DIR          = Path(__file__).parent.resolve()
+WIKI_BASE_PATH: Path= Path(os.getenv("WIKI_BASE_PATH", ""))
+EOOKS_PATH: Path = Path(os.getenv("EOOKS_PATH", ""))
 
-WIKI_BASE_PATH  = ""
-# 加载环境相关的配置
-def load_environment_config():
-    """根据主机名或环境变量加载相应环境的配置"""
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                all_configs = json.load(f)
-            
-            # 获取当前环境标识（优先级：环境变量 > 主机名）
-            env_name = os.environ.get('APP_ENV') or platform.node()
-            
-            # 查找匹配的环境配置
-            config = {}
-            for key, value in all_configs.items():
-                if key == env_name or (isinstance(value, dict) and value.get('hostname') == env_name):
-                    config = value
-                    break
-            
-            # 如果没找到精确匹配，尝试模糊匹配主机名
-            if not config:
-                for key, value in all_configs.items():
-                    if isinstance(value, dict) and 'hostname' in value and value['hostname'] in env_name:
-                        config = value
-                        break
-            
-            # 如果仍然没找到，使用默认配置（如果有）
-            if not config and 'default' in all_configs:
-                config = all_configs['default']
-                
-            return config
-        except Exception as e:
-            logger.debug(f"加载配置文件时出错: {e}")
-    return {}
-
-# 应用环境配置
-env_config = load_environment_config()
-WIKI_BASE_PATH = env_config.get("WIKI_BASE_PATH", WIKI_BASE_PATH)
-
-LOG_LEVEL = env_config.get("LOG_LEVEL", "INFO")
-
-# 加载配置信息
-OLLAMA_BASE_URL = env_config.get("OLLAMA_BASE_URL", OLLAMA_BASE_URL)
-OLLAMA_MODEL = env_config.get("OLLAMA_MODEL", OLLAMA_MODEL)
-DEEPSEEK_API_KEY = env_config.get("DEEPSEEK_API_KEY", DEEPSEEK_API_KEY)
-PROXIES = env_config.get("PROXIES", PROXIES)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+PROXIES = {}
+http_proxy = os.getenv("HTTP_PROXY")
+https_proxy = os.getenv("HTTPS_PROXY")
+if http_proxy or https_proxy:
+    PROXIES = {}
+    if http_proxy:
+        PROXIES["http"] = http_proxy
+    if https_proxy:
+        PROXIES["https"] = https_proxy
 
 DATA_DIR        = SCRIPT_DIR / "data"
 PROCESSING_DIR  = DATA_DIR / "processing"
-PROCESSING_DIR.mkdir(exist_ok=True)
 LOG_DIR         = SCRIPT_DIR / "logs"
+PROCESSING_DIR.mkdir(exist_ok=True)
 LOG_DIR.mkdir(exist_ok=True)
 # 根据hostname设置不同的日志文件
-hostname = platform.node()
-LOG_FILE = LOG_DIR / f"pdf_plumber_{hostname}.log"
+LOG_FILE = LOG_DIR / f"pdf_plumber_{platform.node()}.log"
 
 # 日志系统
 class Logger:
@@ -119,8 +81,14 @@ class Logger:
             console_handler.setFormatter(formatter)
             self.logger.addHandler(console_handler)
             
-            # 文件处理器
-            file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
+            # 文件处理器 - 使用TimedRotatingFileHandler按天轮转日志
+            file_handler = TimedRotatingFileHandler(
+                LOG_FILE, 
+                when="midnight", 
+                interval=1, 
+                backupCount=30, 
+                encoding='utf-8'
+            )
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
         
@@ -219,12 +187,12 @@ def check_model_exists(base_url=None, model_name=None):
         logger.error(f"检查模型时出错：{e}")
         raise SystemExit(1)
 
-def load_json_file(json_path: str) -> Dict[Any, Any]:
+def load_json_file(json_path: Path) -> Dict[Any, Any]:
     """
     读取JSON文件并返回其内容
     
     Args:
-        json_path (str): JSON文件的路径
+        json_path (Path): JSON文件的路径
         
     Returns:
         dict: JSON文件的内容
@@ -233,7 +201,7 @@ def load_json_file(json_path: str) -> Dict[Any, Any]:
         FileNotFoundError: 当文件不存在时
         json.JSONDecodeError: 当文件不是有效的JSON格式时
     """
-    if not os.path.exists(json_path):
+    if not json_path.exists():
         raise FileNotFoundError(f"JSON文件不存在: {json_path}")
     
     try:
@@ -246,7 +214,7 @@ def is_target_file(filename: str) -> bool:
     """判断文件是否为目标文件（即需要被忽略的文件）
     
     Args:
-        filename: 文件名
+        filename (str): 文件名
         
     Returns:
         bool: 如果是目标文件返回True，否则返回False
@@ -263,7 +231,7 @@ def is_target_file_2(filename: str) -> str:
         filename: 文件名
         
     Returns:
-        bool: 如果是目标文件返回True，否则返回False
+        str: 返回特定后缀
     """
     for suffix in TARGET_SUFFIXES:
         if filename.endswith(suffix):
@@ -302,12 +270,141 @@ def is_highly_similar(text1, text2, threshold=0.99):
     similarity = SequenceMatcher(None, text1, text2).ratio()
     return similarity >= threshold
 
-def has_bookmarks(pdf_path: str) -> bool:
+def has_bookmarks(pdf_path: Path) -> bool:
     with fitz.open(pdf_path) as doc:
         # 大纲（Outline）即书签；无大纲时返回空列表
         return bool(doc.get_toc())   # True → 有书签，False → 无书签
 
-
 # 规范化 ISBN 方便比较
 def _normalize_isbn(s):
     return re.sub(r'[^0-9Xx]', '', s or '')
+
+def has_explanatory_note(src: str, trans: str) -> bool:
+    """
+    判断翻译内容是否带有解释性说明。
+    如果包含常见的解释性短语（如“根据上下文”、“注：”、“建议”、“应当直接翻译为”等），返回 True。
+    
+    参数:
+        src (str): 原文
+        trans (str): 译文
+    
+    返回:
+        bool: 有解释性说明返回 True，否则 False
+    """
+    # 有多行内容，说明有注释
+    # 如：【仪表礼仪 для成功
+    #
+    # 注：根据上下文和指导原则，“Dressing for success”更贴切的翻译应为“仪表礼仪”，而非直接翻译为“着装以求成功”。因此，此处无需额外补充说明。】
+    if '\n' not in src and '\n' in trans:
+        logger.debug(f"翻译有换行：{trans}")
+        return True
+
+    # 先快速正则匹配
+    if has_explanatory_note_re(trans.replace('\n', ' ')):
+        return has_explained_content_llm  # LLM 判断
+ 
+    return False
+    
+def has_explanatory_note_re(text: str) -> bool:
+    """
+    通过正则表达式判断翻译内容是否带有解释性说明。
+    如果包含常见的解释性短语（如“根据上下文”、“注：”、“建议”、“应当直接翻译为”等），返回 True。
+    
+    参数:
+        text (str): 需要检查的翻译字符串
+    
+    返回:
+        bool: 有解释性说明返回 True，否则 False
+    """
+    if not text:
+        return False
+    
+    # 常见的解释性关键词和模式（可根据实际日志扩展）
+    patterns = [
+        r'译',
+        # r'译文',
+        # r'翻译',
+        # r'译为',
+        r'原文',
+        r'建议',
+        r'根据',
+        r'纠正',
+        # r'应译为',
+        # r'建议.*翻译为',
+        # r'应翻译为',
+        # r'应当翻译为.*或',
+        # r'直接翻译',
+        r'注：',                 # 注释开头
+        r'备注：',
+        # r'建议根据',
+        r'上下文',          # 如“根据上下文\依据上下文”
+        r'无需.*说明',
+        r'若未明确指示',
+        r'按照.*指导',
+        r'如需',
+        r'不必考虑',
+        r'简化为',
+        # r'如原文中出现',
+    ]
+    
+    # 合并为一个大正则
+    combined_pattern = '|'.join(patterns)
+    
+    return bool(re.search(combined_pattern, text))
+
+def has_explained_content_llm(src: str, mt: str) -> bool:
+    """
+    比较两段文本：
+    src 是原文；
+    mt 是译文。
+    返回 True 表示 mt 里**多出了**解释性内容，False 表示没有。
+    """
+    prompt = (
+        "你是一名严格的翻译质检员。下面给你两段中文：\n"
+        "第一段【原文】是标准答案，不含任何解释、注释、说明、理由等；\n"
+        "第二段【译文】是待检查版本。\n"
+        "请判断【译文】是否**额外出现**了解释、注释、说明、理由、补充等“解释性内容”。\n"
+        "注意：不能仅凭几个词就下结论，要综合语义判断；如果【译文】只是用词不同而没有额外解释，请返回 false。\n"
+        "请只回答 true 或 false，不要输出任何额外文字。\n\n"
+        f"【原文】\n{src}\n\n"
+        f"【译文】\n{mt}"
+    )
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "temperature": 0
+    }
+
+    try:
+        resp = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json=payload,
+            timeout=OLLAMA_TIMEOUT
+        )
+        resp.raise_for_status()
+        answer = resp.json()["response"].strip().lower()
+        return answer == "true"
+    except Exception as e:
+        logger.warn(f"Ollama call failed: {e}")
+        return False
+
+# ==============================
+# 4. 深度清理标题（重点！解决 &#10; 换行问题）
+# ==============================
+def deep_clean_title(text: str) -> str:
+    """彻底清除 PDF 书签中的换行符、控制字符、XML 实体"""
+    if not text:
+        return ""
+    # XML 实体换行
+    text = re.sub(r'&#(?:x0?[0A9D]|10|13);', ' ', text)
+    # 真实换行
+    text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+    # 各种空格
+    text = text.replace('\u00a0', ' ').replace('\u2009', ' ').replace('\u200b', '').replace('\ufeff', '')
+    # 非法字符
+    text = re.sub(r'[\ud800-\udfff]', '', text)
+    # 合并空格
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text

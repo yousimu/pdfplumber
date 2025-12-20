@@ -8,3 +8,5 @@ langdetect
 slugify
 frontend
 rapidocr_onnxruntime
+pytest
+python-dotenv
